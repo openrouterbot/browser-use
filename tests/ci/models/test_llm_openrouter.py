@@ -1,5 +1,6 @@
 """Regression tests for OpenRouter client setup and response handling."""
 
+import inspect
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -76,3 +77,28 @@ async def test_structured_provider_error_keeps_status_code():
 			await llm.ainvoke([UserMessage(content='question')], Answer)
 
 	assert exc_info.value.status_code == 500
+
+
+async def test_extra_body_reaches_sdk_extra_body_param():
+	extra_body = {
+		'provider': {'order': ['openai']},
+		'models': ['openai/gpt-4o', 'anthropic/claude-sonnet-4.5'],
+		'usage': {'include': True},
+	}
+	llm = ChatOpenRouter(model='openai/gpt-4o', api_key='test-key', extra_body=extra_body)
+
+	client = llm.get_client()
+	# Captured before patching: chat.completions.create is keyword-only with no **kwargs, so
+	# OpenRouter-only keys are only deliverable via the SDK's own extra_body= parameter.
+	real_create_signature = inspect.signature(client.chat.completions.create)
+
+	for output_format in (None, Answer):
+		create = AsyncMock(return_value=_completion(content='{"answer": "ok"}'))
+		with patch.object(type(client.chat.completions), 'create', create):
+			await llm.ainvoke([UserMessage(content='question')], output_format)
+
+		request_kwargs = create.await_args_list[0].kwargs
+		assert request_kwargs['extra_body'] == extra_body
+		for openrouter_only_key in extra_body:
+			assert openrouter_only_key not in request_kwargs
+		real_create_signature.bind(**request_kwargs)
